@@ -8,8 +8,8 @@
 # =============================================================================
 
 substitutions:
-  espcontrol_component_url: "https://github.com/jtenniswood/espcontrol"
-  espcontrol_component_ref: "main"
+  espcontrol_component_url: "https://github.com/shoveland/espcontrol"
+  espcontrol_component_ref: "voice-v2.11"
   mdi_font_file: "https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/fonts/materialdesignicons-webfont.ttf"
 
 # ---------------------------------------------------------------------------
