@@ -159,7 +159,7 @@ web_server:
   port: 80
   version: 3
   include_internal: true
-  js_url: https://cdn.jsdelivr.net/gh/shoveland/espcontrol@voice-v2.11/docs/public/webserver/embedded/www.js
+  js_url: https://cdn.jsdelivr.net/gh/shoveland/espcontrol@9abeb5cc217fec992340f9e2e43651dae56f6d67/docs/public/webserver/embedded/www.js
   sorting_groups:
     - id: sg_button
       name: "Button Configuration"
