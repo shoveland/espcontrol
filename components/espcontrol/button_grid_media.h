@@ -5070,9 +5070,9 @@ inline void open_device_volume_modal(lv_obj_t *anchor,
   if (!ctx) {
     ctx = new MediaVolumeCtx();
     ctx->max_pct = 100;
-    ctx->accent_color = DEFAULT_SLIDER_COLOR;
-    ctx->secondary_color = SECONDARY_GREY;
-    ctx->tertiary_color = TERTIARY_GREY;
+    ctx->accent_color = DEFAULT_ACCENT_COLOR;
+    ctx->secondary_color = theme_display_color(current_theme().surface_primary);
+    ctx->tertiary_color = theme_display_color(current_theme().surface_secondary);
   }
   if (subscribed_player != player) {
     subscribed_player = player;

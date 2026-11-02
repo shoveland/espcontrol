@@ -3540,7 +3540,7 @@ inline void media_volume_apply_mic_button_state(MediaVolumeCtx *ctx) {
   bool muted = ctx->mic_muted();
   lv_label_set_display_text(ui.mic_lbl, muted ? "\U000F036D" : "\U000F036C");
   lv_obj_set_style_text_color(ui.mic_lbl,
-    lv_color_hex(DARK_TEXT_PRIMARY), LV_PART_MAIN);
+    lv_color_hex(current_theme().text_primary), LV_PART_MAIN);
 }
 
 inline void media_volume_refresh_active_mic_button() {
@@ -3824,7 +3824,7 @@ inline void media_volume_open_modal(MediaVolumeCtx *ctx) {
 
   if (media_volume_has_mic_control(ctx)) {
     ui.mic_btn = control_modal_create_round_button(ui.panel, 32, "\U000F036C",
-      ctx->icon_font, DARK_BORDER, SECONDARY_GREY, ctx->width_compensation_percent);
+      ctx->icon_font, theme_display_color(current_theme().border), theme_display_color(current_theme().surface_primary), ctx->width_compensation_percent);
     if (ui.mic_btn) {
       control_modal_style_chrome_button(ui.mic_btn, shell.layout, true);
       ui.mic_lbl = lv_obj_get_child(ui.mic_btn, 0);
