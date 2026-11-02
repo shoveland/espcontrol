@@ -432,6 +432,7 @@ export default defineConfig({
           { text: 'Battery', link: '/features/battery' },
           { text: 'Factory Reset', link: '/features/backup#reset-the-display' },
           { text: 'Built-in Relays', link: '/features/relays' },
+          { text: 'Voice Control', link: '/features/voice-control' },
         ],
       },
       {
