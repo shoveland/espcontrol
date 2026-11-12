@@ -178,6 +178,7 @@ packages:
   fw_update:       !include ../../common/addon/firmware_update${firmware_update_package_suffix}.yaml
   voice_assistant: !include device/voice_assistant.yaml
   voice_timer_display: !include device/voice_timer_display.yaml
+  voice_orb_display: !include device/voice_orb_display.yaml
   physical_volume_button: !include device/physical_volume_button${network_package_suffix}.yaml
 
   # ---------------------------------------------------------------------------

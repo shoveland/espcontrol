@@ -1,0 +1,84 @@
+# =============================================================================
+# VOICE ORB DISPLAY - Waveshare ESP32-P4 86 Panel
+# =============================================================================
+# Siri-style indicator while the voice assistant is active: an animated orb at
+# the bottom centre (breathing while listening, swelling with your voice,
+# spinning while thinking, pulsing while replying) and a caption with what was
+# heard and the reply. Tapping the orb stops the assistant. The panel already
+# wakes and returns home for voice (restore_voice_home_ui), so the orb needs no
+# display takeover. The widgets live in components/espcontrol/voice_orb_overlay.h.
+#
+# Requires voice_assistant.yaml (ha_voice_assistant, voice_mic_sound_level,
+# cancel_voice_response).
+# =============================================================================
+
+script:
+  - id: voice_orb_set_phase
+    mode: queued
+    max_runs: 4
+    parameters:
+      phase: int
+    then:
+      - lambda: |-
+          namespace vo = espcontrol::voice_orb;
+          vo::Fonts fonts;
+          fonts.body = id(font_text_body)->get_lv_font();
+          fonts.small = id(font_text_small)->get_lv_font();
+          vo::ensure_created(fonts);
+          if (!vo::orb().on_tap) {
+            vo::orb().on_tap = []() {
+              vo::finish();
+              id(cancel_voice_response).execute();
+            };
+          }
+          vo::set_phase(static_cast<vo::Phase>(phase), current_button_primary_color());
+
+voice_assistant:
+  on_start:
+    - lambda: espcontrol::voice_orb::begin_interaction();
+    - script.execute:
+        id: voice_orb_set_phase
+        phase: !lambda return static_cast<int>(espcontrol::voice_orb::Phase::LISTENING);
+  on_listening:
+    - script.execute:
+        id: voice_orb_set_phase
+        phase: !lambda return static_cast<int>(espcontrol::voice_orb::Phase::LISTENING);
+  on_stt_vad_start:
+    - script.execute:
+        id: voice_orb_set_phase
+        phase: !lambda return static_cast<int>(espcontrol::voice_orb::Phase::SPEAKING);
+  on_stt_vad_end:
+    - script.execute:
+        id: voice_orb_set_phase
+        phase: !lambda return static_cast<int>(espcontrol::voice_orb::Phase::THINKING);
+  on_stt_end:
+    - script.execute:
+        id: voice_orb_set_phase
+        phase: !lambda return static_cast<int>(espcontrol::voice_orb::Phase::THINKING);
+    - lambda: espcontrol::voice_orb::set_user_text(x);
+  on_intent_start:
+    - script.execute:
+        id: voice_orb_set_phase
+        phase: !lambda return static_cast<int>(espcontrol::voice_orb::Phase::THINKING);
+  on_tts_start:
+    - script.execute:
+        id: voice_orb_set_phase
+        phase: !lambda return static_cast<int>(espcontrol::voice_orb::Phase::REPLYING);
+    - lambda: espcontrol::voice_orb::set_reply_text(x);
+  # Idle follows the end of the spoken reply, not just the pipeline run.
+  on_idle:
+    - lambda: espcontrol::voice_orb::finish();
+  on_error:
+    - lambda: |-
+        // Ignore errors when nothing is on screen (for example a reconnect).
+        if (espcontrol::voice_orb::orb().phase == espcontrol::voice_orb::Phase::HIDDEN) return;
+        espcontrol::voice_orb::error(
+            code == "stt-no-text-recognized" ? "Sorry, I didn't catch that"
+                                             : "Something went wrong",
+            current_button_primary_color());
+
+sensor:
+  - id: !extend voice_mic_sound_level
+    rms:
+      on_value:
+        - lambda: espcontrol::voice_orb::set_level_db(x);
