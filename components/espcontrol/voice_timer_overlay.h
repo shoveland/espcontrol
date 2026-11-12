@@ -24,9 +24,6 @@ struct Fonts {
   const lv_font_t *icon{nullptr};
 };
 
-// Long enough that a brush against the panel does not cancel a timer.
-inline constexpr uint32_t HOLD_TO_CANCEL_MS = 1500;
-inline constexpr uint32_t HOLD_FEEDBACK_MS = 400;
 inline constexpr int32_t RING_SCALE = 1000;
 
 struct Overlay {
@@ -41,14 +38,7 @@ struct Overlay {
   lv_obj_t *chip_label{nullptr};
   View view{View::HIDDEN};
   bool ringing{false};
-  std::string hint_text;
-  std::string status_text;
-  uint32_t status_until_ms{0};
-  uint32_t press_started_ms{0};
-  bool hold_fired{false};
-  bool pressed{false};
   std::function<void()> on_full_tap;
-  std::function<void()> on_full_hold;
   std::function<void()> on_chip_tap;
 };
 
@@ -93,56 +83,6 @@ inline void strip_container(lv_obj_t *obj) {
   lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
 }
 
-// A short status (such as a cancel result) replaces the hint until it expires.
-inline void refresh_hint() {
-  Overlay &o = overlay();
-  if (!o.hint) return;
-  const bool status = !o.status_text.empty() &&
-                      static_cast<int32_t>(o.status_until_ms - lv_tick_get()) > 0;
-  if (!status) o.status_text.clear();
-  lv_label_set_text(o.hint, status ? o.status_text.c_str() : o.hint_text.c_str());
-}
-
-inline void show_status(const std::string &text, uint32_t duration_ms) {
-  Overlay &o = overlay();
-  o.status_text = text;
-  o.status_until_ms = lv_tick_get() + duration_ms;
-  refresh_hint();
-}
-
-inline void full_event(lv_event_t *event) {
-  Overlay &o = overlay();
-  switch (lv_event_get_code(event)) {
-    case LV_EVENT_PRESSED:
-      o.press_started_ms = lv_tick_get();
-      o.hold_fired = false;
-      o.pressed = true;
-      break;
-    case LV_EVENT_LONG_PRESSED:
-    case LV_EVENT_LONG_PRESSED_REPEAT: {
-      if (o.hold_fired) break;
-      const uint32_t held = lv_tick_elaps(o.press_started_ms);
-      if (held >= HOLD_TO_CANCEL_MS) {
-        o.hold_fired = true;
-        if (o.on_full_hold) o.on_full_hold();
-      } else if (held >= HOLD_FEEDBACK_MS && !o.ringing && o.hint) {
-        lv_label_set_text(o.hint, "Keep holding to cancel");
-      }
-      break;
-    }
-    case LV_EVENT_RELEASED:
-    case LV_EVENT_PRESS_LOST:
-      o.pressed = false;
-      if (!o.hold_fired) refresh_hint();
-      break;
-    case LV_EVENT_SHORT_CLICKED:
-      if (o.on_full_tap) o.on_full_tap();
-      break;
-    default:
-      break;
-  }
-}
-
 inline void ensure_created(const Fonts &fonts) {
   Overlay &o = overlay();
   if (o.full) return;
@@ -182,11 +122,9 @@ inline void ensure_created(const Fonts &fonts) {
   o.detail = make_label(o.full, fonts.body);
   o.hint = make_label(o.full, fonts.small);
   lv_obj_set_style_pad_top(o.hint, 12, LV_PART_MAIN);
-  for (lv_event_code_t code : {LV_EVENT_PRESSED, LV_EVENT_LONG_PRESSED,
-                               LV_EVENT_LONG_PRESSED_REPEAT, LV_EVENT_RELEASED,
-                               LV_EVENT_PRESS_LOST, LV_EVENT_SHORT_CLICKED}) {
-    lv_obj_add_event_cb(o.full, full_event, code, nullptr);
-  }
+  lv_obj_add_event_cb(o.full, [](lv_event_t *) {
+    if (overlay().on_full_tap) overlay().on_full_tap();
+  }, LV_EVENT_CLICKED, nullptr);
 
   // Minimised: a pill floating at the bottom centre, above the cards.
   o.chip = lv_obj_create(layer);
@@ -278,9 +216,7 @@ inline void show_countdown(const std::string &name, uint32_t seconds_left,
   lv_label_set_text(o.detail, detail.c_str());
   lv_arc_set_value(o.ring, total_seconds == 0 ? RING_SCALE
       : static_cast<int32_t>(static_cast<uint64_t>(seconds_left) * RING_SCALE / total_seconds));
-  o.hint_text = std::string("Tap to minimise") + SEPARATOR + "Hold to cancel";
-  // Leave "Keep holding to cancel" in place while a finger is down.
-  if (!o.pressed) refresh_hint();
+  lv_label_set_text(o.hint, "Tap to minimise");
   char chip_buf[64];
   snprintf(chip_buf, sizeof(chip_buf), "%s  %s%s", title, time_buf, others > 0 ? "  +" : "");
   lv_label_set_text(o.chip_label, chip_buf);
@@ -290,14 +226,12 @@ inline void show_ringing(const std::string &name, int others) {
   Overlay &o = overlay();
   if (!o.full) return;
   o.ringing = true;
-  o.status_text.clear();
   lv_label_set_text(o.title, name.empty() ? "Timer" : name.c_str());
   lv_label_set_text(o.time, "00:00");
   std::string detail = "Time's up";
   if (others > 0) detail += SEPARATOR + others_text(others);
   lv_label_set_text(o.detail, detail.c_str());
-  o.hint_text = "Tap to stop";
-  refresh_hint();
+  lv_label_set_text(o.hint, "Tap to stop");
 }
 
 }  // namespace espcontrol::voice_timer
