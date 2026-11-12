@@ -2,11 +2,13 @@
 # VOICE TIMER DISPLAY - Waveshare ESP32-P4 86 Panel
 # =============================================================================
 # Full-screen countdown while a voice timer ("Hey Jarvis, set a timer for 5
-# minutes") is running. It covers the screensaver by holding an INTERACTIVE
-# display takeover; tapping minimises it to a clock-bar chip and releases the
-# takeover, and tapping the chip brings the countdown back. When a timer
-# finishes, a CRITICAL takeover shows "Time's up" until the alarm stops; tapping
-# stops the alarm. The widgets live in components/espcontrol/voice_timer_overlay.h.
+# minutes") is running, with a ring that empties as time runs out. It covers
+# the screensaver by holding an INTERACTIVE display takeover; tapping minimises
+# it to a pill at the bottom centre and releases the takeover, and tapping the
+# pill brings the countdown back. Holding the countdown for 1.5s asks Home
+# Assistant to cancel that timer. When a timer finishes, a CRITICAL takeover
+# shows "Time's up" at full brightness until the alarm stops; tapping stops the
+# alarm. The widgets live in components/espcontrol/voice_timer_overlay.h.
 #
 # Requires voice_assistant.yaml (ha_voice_assistant, timer_ringing).
 # =============================================================================
@@ -25,6 +27,16 @@ globals:
   - id: voice_timer_takeover_held
     type: int
     initial_value: '0'
+  # The timer the countdown is showing, for hold-to-cancel.
+  - id: voice_timer_shown_id
+    type: std::string
+    initial_value: '""'
+  - id: voice_timer_shown_name
+    type: std::string
+    initial_value: '""'
+  - id: voice_timer_shown_total
+    type: uint32_t
+    initial_value: '0'
 
 script:
   - id: voice_timer_refresh
@@ -40,6 +52,7 @@ script:
           fonts.digits = id(font_number_value_large)->get_lv_font();
           fonts.title = id(font_text_title)->get_lv_font();
           fonts.body = id(font_text_body)->get_lv_font();
+          fonts.small = id(font_text_small)->get_lv_font();
           fonts.icon = id(font_icon_main)->get_lv_font();
           vt::ensure_created(fonts);
           vt::Overlay &o = vt::overlay();
@@ -52,6 +65,13 @@ script:
                 id(voice_timer_minimised) = true;
               }
               id(voice_timer_refresh).execute(std::string());
+            };
+            o.on_full_hold = []() {
+              if (id(voice_timer_ringing_active)) {
+                vt::overlay().on_full_tap();
+              } else {
+                id(voice_timer_cancel_request).execute();
+              }
             };
             o.on_chip_tap = []() {
               id(voice_timer_minimised) = false;
@@ -81,7 +101,11 @@ script:
             view = vt::View::FULL;
             hold = 1 + static_cast<int>(DisplayTakeoverKind::CRITICAL);
           } else if (next != nullptr) {
-            vt::show_countdown(next->name, next->seconds_left, next->is_active, count - 1);
+            id(voice_timer_shown_id) = next->id;
+            id(voice_timer_shown_name) = next->name;
+            id(voice_timer_shown_total) = next->total_seconds;
+            vt::show_countdown(next->name, next->seconds_left, next->total_seconds,
+                               next->is_active, count - 1);
             if (id(voice_timer_minimised)) {
               view = vt::View::CHIP;
             } else {
@@ -105,6 +129,59 @@ script:
             if (held != 0) id(display_takeover_end).execute(held - 1);
             id(voice_timer_takeover_held) = hold;
           }
+
+  # Home Assistant cancels voice timers through its timer intents, which match
+  # by name or by the duration that was spoken; conversation.process has no
+  # device field, so name the timer as specifically as possible. With a
+  # single timer in the house, "cancel the timer" always matches.
+  - id: voice_timer_cancel_request
+    mode: single
+    then:
+      - lambda: espcontrol::voice_timer::show_status("Cancelling...", 5000);
+      - homeassistant.action:
+          action: conversation.process
+          data:
+            agent_id: conversation.home_assistant
+            text: !lambda |-
+              const std::string &name = id(voice_timer_shown_name);
+              if (!name.empty()) return "cancel the " + name + " timer";
+              const uint32_t total = id(voice_timer_shown_total);
+              const char *unit = nullptr;
+              uint32_t amount = 0;
+              if (total > 0 && total % 3600 == 0) { amount = total / 3600; unit = "hour"; }
+              else if (total > 0 && total % 60 == 0 && total < 3600) { amount = total / 60; unit = "minute"; }
+              else if (total > 0 && total < 60) { amount = total; unit = "second"; }
+              if (unit == nullptr) return std::string("cancel the timer");
+              char buf[48];
+              snprintf(buf, sizeof(buf), "cancel the %u %s timer", (unsigned) amount, unit);
+              return std::string(buf);
+      - delay: 4s
+      - lambda: |-
+          for (const auto &timer : id(ha_voice_assistant).get_timers()) {
+            if (timer.id == id(voice_timer_shown_id)) {
+              espcontrol::voice_timer::show_status(
+                  "Couldn't cancel - say \"cancel the timer\"", 8000);
+              return;
+            }
+          }
+
+  # Hold the backlight at full brightness while "Time's up" shows; scheduled
+  # brightness updates can run underneath, so re-assert it until the alarm
+  # stops, then hand back to the panel's normal brightness rules.
+  - id: voice_timer_brightness_boost
+    mode: restart
+    then:
+      - delay: 600ms
+      - while:
+          condition:
+            lambda: return id(voice_timer_ringing_active);
+          then:
+            - light.turn_on:
+                id: display_backlight
+                brightness: 100%
+                transition_length: 300ms
+            - delay: 5s
+      - script.execute: backlight_apply_brightness
 
   # start_voice_timer_alert publishes OFF then ON 100ms later when it
   # (re)starts the chime, so only treat OFF as a stop once it has settled.
@@ -147,6 +224,7 @@ voice_assistant:
     - script.execute:
         id: voice_timer_refresh
         exclude_id: !lambda return timer.id;
+    - script.execute: voice_timer_brightness_boost
 
 switch:
   # The alarm can also stop by voice ("stop"), from Home Assistant, or after
@@ -158,5 +236,11 @@ switch:
       - script.execute:
           id: voice_timer_refresh
           exclude_id: ""
+      - if:
+          condition:
+            not:
+              script.is_running: voice_timer_brightness_boost
+          then:
+            - script.execute: voice_timer_brightness_boost
     on_turn_off:
       - script.execute: voice_timer_ringing_stopped
