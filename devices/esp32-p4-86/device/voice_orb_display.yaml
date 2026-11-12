@@ -33,16 +33,37 @@ script:
           }
           vo::set_phase(static_cast<vo::Phase>(phase), current_button_primary_color());
 
+  # ESPHome only fires on_idle in continuous mode, and on_tts_stream_end only
+  # for raw-speaker replies, so neither marks the end here. Watch for the real
+  # end instead: the pipeline has stopped and the spoken reply has finished.
+  # A follow-up question goes straight back to listening without stopping.
+  - id: voice_orb_watch_end
+    mode: restart
+    then:
+      - delay: 1s
+      - wait_until:
+          condition:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing:
+                    id: voice_media_player
+          timeout: 120s
+      - lambda: espcontrol::voice_orb::finish();
+
 voice_assistant:
   on_start:
     - lambda: espcontrol::voice_orb::begin_interaction();
     - script.execute:
         id: voice_orb_set_phase
         phase: !lambda return static_cast<int>(espcontrol::voice_orb::Phase::LISTENING);
+    - script.execute: voice_orb_watch_end
   on_listening:
     - script.execute:
         id: voice_orb_set_phase
         phase: !lambda return static_cast<int>(espcontrol::voice_orb::Phase::LISTENING);
+    - script.execute: voice_orb_watch_end
   on_stt_vad_start:
     - script.execute:
         id: voice_orb_set_phase
@@ -65,9 +86,6 @@ voice_assistant:
         id: voice_orb_set_phase
         phase: !lambda return static_cast<int>(espcontrol::voice_orb::Phase::REPLYING);
     - lambda: espcontrol::voice_orb::set_reply_text(x);
-  # Idle follows the end of the spoken reply, not just the pipeline run.
-  on_idle:
-    - lambda: espcontrol::voice_orb::finish();
   on_error:
     - lambda: |-
         // Ignore errors when nothing is on screen (for example a reconnect).

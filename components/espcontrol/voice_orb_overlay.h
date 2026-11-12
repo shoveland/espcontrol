@@ -28,7 +28,8 @@ inline constexpr lv_coord_t RING_SIZE = 150;
 inline constexpr lv_coord_t CORE_SIZE = 104;
 inline constexpr lv_coord_t CAPTION_WIDTH = 640;
 inline constexpr uint32_t FRAME_MS = 33;
-inline constexpr uint32_t CAPTION_LINGER_MS = 4000;
+inline constexpr uint32_t ORB_LINGER_MS = 2000;
+inline constexpr uint32_t CAPTION_LINGER_MS = 5000;
 inline constexpr uint32_t ERROR_LINGER_MS = 2500;
 inline constexpr uint32_t ERROR_COLOR = 0xE53935;
 inline constexpr size_t USER_TEXT_MAX = 90;
@@ -311,14 +312,21 @@ inline void set_reply_text(const std::string &text) {
   refresh_caption_visibility();
 }
 
-// The reply has finished: the orb fades now, the caption a little later.
+// The interaction is over: the orb settles into a calm breathe and fades after
+// ORB_LINGER_MS, and the caption stays readable for CAPTION_LINGER_MS.
 inline void finish() {
   Orb &o = orb();
   if (!o.root || o.phase == Phase::HIDDEN) return;
   if (o.phase == Phase::ERROR) return;  // error() schedules its own fade
-  o.orb_wanted = false;
-  o.caption_hide_at_ms = o.caption_wanted ? lv_tick_get() + CAPTION_LINGER_MS : 0;
-  if (!o.caption_wanted) o.caption_hide_at_ms = 0;
+  if (o.orb_hide_at_ms != 0) return;    // already finishing
+  const uint32_t now = lv_tick_get();
+  if (o.phase != Phase::LISTENING) o.phase_started_ms = now;
+  o.phase = Phase::LISTENING;
+  o.level_target = 0.0f;
+  set_hidden(o.ring, true);
+  apply_colours();
+  o.orb_hide_at_ms = now + ORB_LINGER_MS;
+  o.caption_hide_at_ms = o.caption_wanted ? now + CAPTION_LINGER_MS : 0;
 }
 
 inline void error(const std::string &message, uint32_t accent) {
