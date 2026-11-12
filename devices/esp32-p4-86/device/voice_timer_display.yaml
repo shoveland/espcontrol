@@ -1,0 +1,162 @@
+# =============================================================================
+# VOICE TIMER DISPLAY - Waveshare ESP32-P4 86 Panel
+# =============================================================================
+# Full-screen countdown while a voice timer ("Hey Jarvis, set a timer for 5
+# minutes") is running. It covers the screensaver by holding an INTERACTIVE
+# display takeover; tapping minimises it to a clock-bar chip and releases the
+# takeover, and tapping the chip brings the countdown back. When a timer
+# finishes, a CRITICAL takeover shows "Time's up" until the alarm stops; tapping
+# stops the alarm. The widgets live in components/espcontrol/voice_timer_overlay.h.
+#
+# Requires voice_assistant.yaml (ha_voice_assistant, timer_ringing).
+# =============================================================================
+
+globals:
+  - id: voice_timer_minimised
+    type: bool
+    initial_value: 'false'
+  - id: voice_timer_ringing_active
+    type: bool
+    initial_value: 'false'
+  - id: voice_timer_ringing_name
+    type: std::string
+    initial_value: '""'
+  # 0 = none, otherwise 1 + DisplayTakeoverKind of the takeover currently held.
+  - id: voice_timer_takeover_held
+    type: int
+    initial_value: '0'
+
+script:
+  - id: voice_timer_refresh
+    mode: queued
+    max_runs: 3
+    parameters:
+      exclude_id: string
+    then:
+      - lambda: |-
+          namespace vt = espcontrol::voice_timer;
+          using espcontrol::DisplayTakeoverKind;
+          vt::Fonts fonts;
+          fonts.digits = id(font_number_value_large)->get_lv_font();
+          fonts.title = id(font_text_title)->get_lv_font();
+          fonts.body = id(font_text_body)->get_lv_font();
+          fonts.icon = id(font_icon_main)->get_lv_font();
+          vt::ensure_created(fonts);
+          vt::Overlay &o = vt::overlay();
+          if (!o.on_full_tap) {
+            o.on_full_tap = []() {
+              if (id(voice_timer_ringing_active)) {
+                id(voice_timer_ringing_active) = false;
+                if (id(timer_ringing).state) id(timer_ringing).turn_off();
+              } else {
+                id(voice_timer_minimised) = true;
+              }
+              id(voice_timer_refresh).execute(std::string());
+            };
+            o.on_chip_tap = []() {
+              id(voice_timer_minimised) = false;
+              id(voice_timer_refresh).execute(std::string());
+            };
+          }
+
+          // Finished and cancelled events still list the ending timer, so the
+          // caller passes its id to leave it out.
+          const voice_assistant::Timer *next = nullptr;
+          int count = 0;
+          for (const auto &timer : id(ha_voice_assistant).get_timers()) {
+            if (!exclude_id.empty() && timer.id == exclude_id) continue;
+            count++;
+            if (next == nullptr ||
+                (timer.is_active && !next->is_active) ||
+                (timer.is_active == next->is_active &&
+                 timer.seconds_left < next->seconds_left)) {
+              next = &timer;
+            }
+          }
+
+          vt::View view = vt::View::HIDDEN;
+          int hold = 0;
+          if (id(voice_timer_ringing_active)) {
+            vt::show_ringing(id(voice_timer_ringing_name), count);
+            view = vt::View::FULL;
+            hold = 1 + static_cast<int>(DisplayTakeoverKind::CRITICAL);
+          } else if (next != nullptr) {
+            vt::show_countdown(next->name, next->seconds_left, next->is_active, count - 1);
+            if (id(voice_timer_minimised)) {
+              view = vt::View::CHIP;
+            } else {
+              view = vt::View::FULL;
+              hold = 1 + static_cast<int>(DisplayTakeoverKind::INTERACTIVE);
+            }
+          } else {
+            id(voice_timer_minimised) = false;
+          }
+
+          static bool shown_ringing = false;
+          if (view != o.view || o.ringing != shown_ringing) {
+            vt::set_view(view, current_button_primary_color());
+            shown_ringing = o.ringing;
+          }
+
+          // Takeovers are depth counted, so begin and end exactly once each.
+          const int held = id(voice_timer_takeover_held);
+          if (held != hold) {
+            if (hold != 0) id(display_takeover_begin).execute(hold - 1);
+            if (held != 0) id(display_takeover_end).execute(held - 1);
+            id(voice_timer_takeover_held) = hold;
+          }
+
+  # start_voice_timer_alert publishes OFF then ON 100ms later when it
+  # (re)starts the chime, so only treat OFF as a stop once it has settled.
+  - id: voice_timer_ringing_stopped
+    mode: restart
+    then:
+      - delay: 300ms
+      - if:
+          condition:
+            switch.is_off: timer_ringing
+          then:
+            - lambda: id(voice_timer_ringing_active) = false;
+            - script.execute:
+                id: voice_timer_refresh
+                exclude_id: ""
+
+voice_assistant:
+  on_timer_started:
+    - lambda: id(voice_timer_minimised) = false;
+    - script.execute:
+        id: voice_timer_refresh
+        exclude_id: ""
+  on_timer_updated:
+    - script.execute:
+        id: voice_timer_refresh
+        exclude_id: ""
+  on_timer_tick:
+    - script.execute:
+        id: voice_timer_refresh
+        exclude_id: ""
+  on_timer_cancelled:
+    - script.execute:
+        id: voice_timer_refresh
+        exclude_id: !lambda return timer.id;
+  on_timer_finished:
+    - lambda: |-
+        id(voice_timer_ringing_active) = true;
+        id(voice_timer_ringing_name) = timer.name;
+        id(voice_timer_minimised) = false;
+    - script.execute:
+        id: voice_timer_refresh
+        exclude_id: !lambda return timer.id;
+
+switch:
+  # The alarm can also stop by voice ("stop"), from Home Assistant, or after
+  # its 15 minute limit; close "Time's up" whenever that happens.
+  - id: !extend timer_ringing
+    on_turn_on:
+      - script.stop: voice_timer_ringing_stopped
+      - lambda: id(voice_timer_ringing_active) = true;
+      - script.execute:
+          id: voice_timer_refresh
+          exclude_id: ""
+    on_turn_off:
+      - script.execute: voice_timer_ringing_stopped
