@@ -7,7 +7,9 @@
 # it to a pill at the bottom centre and releases the takeover, and tapping the
 # pill brings the countdown back. Timers are set and cancelled by voice. When
 # a timer finishes, a CRITICAL takeover shows "Time's up" at full brightness
-# until the alarm stops; tapping stops the alarm. The widgets live in
+# until the alarm stops; tapping stops the alarm. If Home Assistant never
+# sends "finished" (it forgets timers when it restarts), the panel rings on
+# its own once the timer has sat at zero for 3 seconds. The widgets live in
 # components/espcontrol/voice_timer_overlay.h.
 #
 # Requires voice_assistant.yaml (ha_voice_assistant, timer_ringing).
@@ -26,6 +28,17 @@ globals:
   # 0 = none, otherwise 1 + DisplayTakeoverKind of the takeover currently held.
   - id: voice_timer_takeover_held
     type: int
+    initial_value: '0'
+  # Timers that rang locally because Home Assistant never sent "finished".
+  # ESPHome keeps them in its list until HA says otherwise, so hide them here.
+  - id: voice_timer_ignored
+    type: std::vector<std::string>
+  # The timer currently sitting at zero, and since when (millis).
+  - id: voice_timer_zero_id
+    type: std::string
+    initial_value: '""'
+  - id: voice_timer_zero_since
+    type: uint32_t
     initial_value: '0'
 
 script:
@@ -64,10 +77,12 @@ script:
 
           // Finished and cancelled events still list the ending timer, so the
           // caller passes its id to leave it out.
+          const auto &ignored = id(voice_timer_ignored);
           const voice_assistant::Timer *next = nullptr;
           int count = 0;
           for (const auto &timer : id(ha_voice_assistant).get_timers()) {
             if (!exclude_id.empty() && timer.id == exclude_id) continue;
+            if (std::find(ignored.begin(), ignored.end(), timer.id) != ignored.end()) continue;
             count++;
             if (next == nullptr ||
                 (timer.is_active && !next->is_active) ||
@@ -154,6 +169,52 @@ voice_assistant:
         id: voice_timer_refresh
         exclude_id: ""
   on_timer_tick:
+    # Home Assistant owns voice timers and keeps them only in memory: if it
+    # restarts mid-timer it forgets the timer and never sends "finished",
+    # while the panel's copy counts down to zero and waits forever. Ring
+    # locally once a timer has sat at zero for a few seconds; a late
+    # "finished" from HA just restarts the same chime.
+    - lambda: |-
+        auto &ignored = id(voice_timer_ignored);
+        auto listed = [&](const std::string &timer_id) {
+          for (const auto &timer : timers) {
+            if (timer.id == timer_id) return true;
+          }
+          return false;
+        };
+        ignored.erase(std::remove_if(ignored.begin(), ignored.end(),
+                                     [&](const std::string &timer_id) { return !listed(timer_id); }),
+                      ignored.end());
+
+        const voice_assistant::Timer *stuck = nullptr;
+        for (const auto &timer : timers) {
+          if (timer.is_active && timer.seconds_left == 0 &&
+              std::find(ignored.begin(), ignored.end(), timer.id) == ignored.end()) {
+            stuck = &timer;
+            break;
+          }
+        }
+        if (stuck == nullptr) {
+          id(voice_timer_zero_id).clear();
+          return;
+        }
+        if (stuck->id != id(voice_timer_zero_id)) {
+          id(voice_timer_zero_id) = stuck->id;
+          id(voice_timer_zero_since) = millis();
+          return;
+        }
+        if (millis() - id(voice_timer_zero_since) < 3000) return;
+
+        ESP_LOGW("voice_timer", "No 'finished' from Home Assistant for timer '%s'; ringing locally",
+                 stuck->name.c_str());
+        ignored.push_back(stuck->id);
+        id(voice_timer_zero_id).clear();
+        id(voice_timer_ringing_active) = true;
+        id(voice_timer_ringing_name) = stuck->name;
+        id(voice_timer_minimised) = false;
+        id(voice_assistant_stage).publish_state("Timer finished (local)");
+        id(start_voice_timer_alert).execute();
+        id(voice_timer_brightness_boost).execute();
     - script.execute:
         id: voice_timer_refresh
         exclude_id: ""
