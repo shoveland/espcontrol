@@ -87,17 +87,21 @@ inline lv_obj_t *make_circle(lv_obj_t *parent, lv_coord_t size) {
   lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, LV_PART_MAIN);
   lv_obj_set_style_border_width(obj, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(obj, 0, LV_PART_MAIN);
-  lv_obj_set_style_transform_pivot_x(obj, size / 2, LV_PART_MAIN);
-  lv_obj_set_style_transform_pivot_y(obj, size / 2, LV_PART_MAIN);
   lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
   return obj;
 }
 
-inline void set_scale(lv_obj_t *obj, float scale) {
-  const int32_t value = static_cast<int32_t>(scale * 256.0f);
-  lv_obj_set_style_transform_scale_x(obj, value, LV_PART_MAIN);
-  lv_obj_set_style_transform_scale_y(obj, value, LV_PART_MAIN);
+// Resize the circle rather than using a transform: a plain circle is cheap to
+// draw, while a scaled one is rendered to a buffer and resampled each frame.
+// Diameters are kept even so the centre never shifts by half a pixel.
+inline void set_diameter(lv_obj_t *obj, lv_coord_t base, float scale) {
+  int32_t d = static_cast<int32_t>(base * scale + 1.0f) & ~1;
+  if (d > ORB_BOX) d = ORB_BOX;
+  if (d < 2) d = 2;
+  if (lv_obj_get_width(obj) == d) return;
+  lv_obj_set_size(obj, d, d);
+  lv_obj_center(obj);
 }
 
 inline void apply_colours() {
@@ -146,40 +150,45 @@ inline void tick(lv_timer_t *) {
     o.caption_hide_at_ms = 0;
   }
 
-  // The mic level arrives about twice a second; ease towards it every frame.
-  o.level += (o.level_target - o.level) * 0.15f;
+  // Ease towards the mic level by elapsed time (about a 120 ms time constant),
+  // so a late or dropped frame does not make the swell lurch.
+  static uint32_t last_ms = now;
+  const float dt = (now - last_ms) / 1000.0f;
+  last_ms = now;
+  const float k = dt >= 0.5f ? 1.0f : 1.0f - expf(-dt / 0.12f);
+  o.level += (o.level_target - o.level) * k;
   const float t = lv_tick_elaps(o.phase_started_ms) / 1000.0f;
   constexpr float TAU = 6.2831853f;
   float glow = 0.85f, core = 1.0f;
   switch (o.phase) {
     case Phase::LISTENING:
-      glow = 0.82f + 0.07f * sinf(TAU * t / 1.6f) + 0.25f * o.level;
-      core = 1.0f + 0.03f * sinf(TAU * t / 1.6f);
+      glow = 0.80f + 0.08f * sinf(TAU * t / 2.4f) + 0.22f * o.level;
+      core = 0.97f + 0.05f * sinf(TAU * t / 2.4f);
       break;
     case Phase::SPEAKING:
-      glow = 0.88f + 0.08f * sinf(TAU * t / 0.55f) + 0.35f * o.level;
-      core = 1.02f + 0.06f * o.level;
+      glow = 0.86f + 0.05f * sinf(TAU * t / 0.9f) + 0.24f * o.level;
+      core = 1.0f + 0.08f * o.level;
       break;
     case Phase::THINKING:
-      glow = 0.80f + 0.04f * sinf(TAU * t / 1.0f);
+      glow = 0.80f + 0.05f * sinf(TAU * t / 1.4f);
       core = 0.92f;
-      lv_arc_set_rotation(o.ring, static_cast<int32_t>(t * 400.0f) % 360);
+      lv_arc_set_rotation(o.ring, static_cast<int32_t>(t * 220.0f) % 360);
       break;
     case Phase::REPLYING: {
       // Two out-of-step waves give a talking, uneven rhythm.
-      const float talk = fabsf(sinf(TAU * t / 0.42f)) * (0.6f + 0.4f * sinf(TAU * t / 1.3f));
-      glow = 0.84f + 0.16f * talk;
-      core = 0.98f + 0.06f * talk;
+      const float talk = fabsf(sinf(TAU * t / 0.6f)) * (0.6f + 0.4f * sinf(TAU * t / 1.7f));
+      glow = 0.84f + 0.14f * talk;
+      core = 0.97f + 0.07f * talk;
       break;
     }
     case Phase::ERROR:
-      glow = 0.8f + 0.05f * sinf(TAU * t / 0.25f);
+      glow = 0.8f + 0.05f * sinf(TAU * t / 0.4f);
       break;
     case Phase::HIDDEN:
       break;
   }
-  set_scale(o.glow, glow);
-  set_scale(o.core, core);
+  set_diameter(o.glow, GLOW_SIZE, glow);
+  set_diameter(o.core, CORE_SIZE, core);
 
   o.orb_opa = step_towards(o.orb_opa, o.orb_wanted ? 255 : 0, 32);
   o.caption_opa = step_towards(o.caption_opa, o.caption_wanted ? 255 : 0, 24);

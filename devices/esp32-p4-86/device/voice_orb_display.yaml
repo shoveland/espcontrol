@@ -96,7 +96,10 @@ voice_assistant:
             current_button_primary_color());
 
 sensor:
+  # Measure every 100 ms rather than 500 ms so the orb follows your voice
+  # smoothly; the sensor is internal and passive, so nothing extra is sent.
   - id: !extend voice_mic_sound_level
+    measurement_duration: 100ms
     rms:
       on_value:
         - lambda: espcontrol::voice_orb::set_level_db(x);
