@@ -34,6 +34,15 @@ inline constexpr uint32_t ERROR_LINGER_MS = 2500;
 inline constexpr uint32_t ERROR_COLOR = 0xE53935;
 inline constexpr size_t USER_TEXT_MAX = 90;
 inline constexpr size_t REPLY_TEXT_MAX = 180;
+// Voice wakes the panel and redraws the home page at the same moment the orb
+// appears; wait for that to settle so the entrance doesn't stutter.
+inline constexpr uint32_t APPEAR_DELAY_MS = 300;
+inline constexpr float ORB_FADE_IN_S = 0.35f;
+inline constexpr float ORB_FADE_OUT_S = 0.30f;
+inline constexpr float CAPTION_FADE_S = 0.30f;
+// Longest step the animation clock takes per frame: when the panel is busy,
+// the motion pauses instead of jumping ahead.
+inline constexpr float MAX_FRAME_S = 0.05f;
 
 struct Orb {
   lv_obj_t *root{nullptr};
@@ -45,7 +54,12 @@ struct Orb {
   lv_obj_t *reply_label{nullptr};
   lv_timer_t *timer{nullptr};
   Phase phase{Phase::HIDDEN};
-  uint32_t phase_started_ms{0};
+  float clock_s{0.0f};          // animation time, advanced by capped frame steps
+  float phase_started_s{0.0f};  // clock_s when the current phase began
+  uint32_t last_tick_ms{0};
+  uint32_t appear_at_ms{0};
+  float orb_fade{0.0f};
+  float caption_fade{0.0f};
   uint32_t accent{0xFF8C00};
   float level{0.0f};
   float level_target{0.0f};
@@ -53,8 +67,8 @@ struct Orb {
   bool caption_wanted{false};
   uint32_t caption_hide_at_ms{0};
   uint32_t orb_hide_at_ms{0};
-  int orb_opa{0};
-  int caption_opa{0};
+  int orb_opa{-1};
+  int caption_opa{-1};
   std::function<void()> on_tap;
 };
 
@@ -125,6 +139,7 @@ inline void apply_colours() {
 }
 
 inline void set_hidden(lv_obj_t *obj, bool hidden) {
+  if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN) == hidden) return;
   if (hidden) {
     lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
   } else {
@@ -132,10 +147,23 @@ inline void set_hidden(lv_obj_t *obj, bool hidden) {
   }
 }
 
-inline int step_towards(int current, int target, int step) {
-  if (current < target) return current + step > target ? target : current + step;
-  if (current > target) return current - step < target ? target : current - step;
-  return current;
+inline float approach(float current, bool up, float step) {
+  const float next = current + (up ? step : -step);
+  return next < 0.0f ? 0.0f : (next > 1.0f ? 1.0f : next);
+}
+
+inline float ease_out(float x) {
+  const float inv = 1.0f - x;
+  return 1.0f - inv * inv * inv;
+}
+
+// Setting a style invalidates the object even when the value is unchanged, so
+// only touch opacity when it moves.
+inline void apply_opa(lv_obj_t *obj, int &shown, int opa) {
+  if (shown == opa) return;
+  shown = opa;
+  lv_obj_set_style_opa(obj, opa, LV_PART_MAIN);
+  set_hidden(obj, opa == 0);
 }
 
 inline void tick(lv_timer_t *) {
@@ -150,14 +178,15 @@ inline void tick(lv_timer_t *) {
     o.caption_hide_at_ms = 0;
   }
 
-  // Ease towards the mic level by elapsed time (about a 120 ms time constant),
-  // so a late or dropped frame does not make the swell lurch.
-  static uint32_t last_ms = now;
-  const float dt = (now - last_ms) / 1000.0f;
-  last_ms = now;
-  const float k = dt >= 0.5f ? 1.0f : 1.0f - expf(-dt / 0.12f);
-  o.level += (o.level_target - o.level) * k;
-  const float t = lv_tick_elaps(o.phase_started_ms) / 1000.0f;
+  float dt = (now - o.last_tick_ms) / 1000.0f;
+  o.last_tick_ms = now;
+  if (dt > MAX_FRAME_S) dt = MAX_FRAME_S;
+  if (dt < 0.0f) dt = 0.0f;
+  o.clock_s += dt;
+
+  // Ease towards the mic level (about a 120 ms time constant).
+  o.level += (o.level_target - o.level) * (1.0f - expf(-dt / 0.12f));
+  const float t = o.clock_s - o.phase_started_s;
   constexpr float TAU = 6.2831853f;
   float glow = 0.85f, core = 1.0f;
   switch (o.phase) {
@@ -187,15 +216,21 @@ inline void tick(lv_timer_t *) {
     case Phase::HIDDEN:
       break;
   }
-  set_diameter(o.glow, GLOW_SIZE, glow);
-  set_diameter(o.core, CORE_SIZE, core);
+  const bool waiting = o.appear_at_ms != 0 && static_cast<int32_t>(now - o.appear_at_ms) < 0;
+  if (!waiting) o.appear_at_ms = 0;
+  const bool show_orb = o.orb_wanted && !waiting;
+  o.orb_fade = approach(o.orb_fade, show_orb, dt / (show_orb ? ORB_FADE_IN_S : ORB_FADE_OUT_S));
+  o.caption_fade = approach(o.caption_fade, o.caption_wanted, dt / CAPTION_FADE_S);
 
-  o.orb_opa = step_towards(o.orb_opa, o.orb_wanted ? 255 : 0, 32);
-  o.caption_opa = step_towards(o.caption_opa, o.caption_wanted ? 255 : 0, 24);
-  lv_obj_set_style_opa(o.root, o.orb_opa, LV_PART_MAIN);
-  lv_obj_set_style_opa(o.caption, o.caption_opa, LV_PART_MAIN);
-  set_hidden(o.root, o.orb_opa == 0);
-  set_hidden(o.caption, o.caption_opa == 0);
+  // The orb grows in from 60% as it fades in, and shrinks as it fades out.
+  const float enter = ease_out(o.orb_fade);
+  const float grow = 0.6f + 0.4f * enter;
+  if (o.orb_fade > 0.0f) {
+    set_diameter(o.glow, GLOW_SIZE, glow * grow);
+    set_diameter(o.core, CORE_SIZE, core * grow);
+  }
+  apply_opa(o.root, o.orb_opa, static_cast<int>(255.0f * enter + 0.5f));
+  apply_opa(o.caption, o.caption_opa, static_cast<int>(255.0f * ease_out(o.caption_fade) + 0.5f));
   if (o.orb_opa == 0 && o.caption_opa == 0 && !o.orb_wanted && !o.caption_wanted) {
     o.phase = Phase::HIDDEN;
     lv_timer_pause(o.timer);
@@ -289,16 +324,22 @@ inline void begin_interaction() {
 inline void set_phase(Phase phase, uint32_t accent) {
   Orb &o = orb();
   if (!o.root) return;
-  if (phase != o.phase) o.phase_started_ms = lv_tick_get();
+  const uint32_t now = lv_tick_get();
+  const bool appearing = o.phase == Phase::HIDDEN;
+  if (phase != o.phase) o.phase_started_s = o.clock_s;
   o.phase = phase;
   o.accent = accent;
   o.orb_wanted = true;
   o.orb_hide_at_ms = 0;
   set_hidden(o.ring, phase != Phase::THINKING);
   apply_colours();
-  lv_obj_move_foreground(o.caption);
-  lv_obj_move_foreground(o.root);
-  lv_timer_resume(o.timer);
+  if (appearing) {
+    if (phase != Phase::ERROR) o.appear_at_ms = now + APPEAR_DELAY_MS;
+    o.last_tick_ms = now;
+    lv_obj_move_foreground(o.caption);
+    lv_obj_move_foreground(o.root);
+    lv_timer_resume(o.timer);
+  }
 }
 
 inline void set_level_db(float db) {
@@ -329,7 +370,7 @@ inline void finish() {
   if (o.phase == Phase::ERROR) return;  // error() schedules its own fade
   if (o.orb_hide_at_ms != 0) return;    // already finishing
   const uint32_t now = lv_tick_get();
-  if (o.phase != Phase::LISTENING) o.phase_started_ms = now;
+  if (o.phase != Phase::LISTENING) o.phase_started_s = o.clock_s;
   o.phase = Phase::LISTENING;
   o.level_target = 0.0f;
   set_hidden(o.ring, true);
